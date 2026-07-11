@@ -6,9 +6,9 @@ A tiny React-based web app for monitoring local system health.
 
 - React dashboard UI
 - Live polling every 2.5 seconds
-- CPU usage and load average
-- Memory and swap usage
-- Root disk usage
+- CPU usage and load average where the OS exposes it
+- Memory and swap/page-file usage
+- Disk usage for `/` on Unix-like systems or the system drive on Windows
 - Network throughput
 - Uptime, process count, temperature if available
 - Alert panel for high CPU, memory, disk, and temperature
@@ -22,6 +22,13 @@ cd system-health-monitor
 python3 server.py
 ```
 
+On Windows, use PowerShell or Command Prompt:
+
+```powershell
+cd system-health-monitor
+py server.py
+```
+
 Open:
 
 ```text
@@ -32,6 +39,14 @@ Optional environment variables:
 
 ```bash
 HEALTH_HOST=127.0.0.1 HEALTH_PORT=3000 python3 server.py
+```
+
+Windows PowerShell:
+
+```powershell
+$env:HEALTH_HOST="127.0.0.1"
+$env:HEALTH_PORT="3000"
+py server.py
 ```
 
 ## CVE scanning
@@ -48,7 +63,9 @@ HEALTH_CVE_CACHE_TTL=1800 python3 server.py
 
 ## Notes
 
-- The backend reads Linux system metrics from `/proc` and `/sys` when available.
+- The backend supports Linux and Windows using Python standard-library APIs where possible.
+- Linux reads detailed metrics from `/proc` and `/sys` when available.
+- Windows support includes CPU, memory/page-file, disk, network totals, uptime, process count, and host details. Temperature and load average may show as unavailable because Windows does not expose them through stable standard-library APIs.
 - CVE scanning uses NVD over the internet and is cached to avoid hammering the public API.
 - The frontend uses React from a CDN, so the browser needs internet access on first load.
 - If you want a production Vite/Node version later, the UI can be moved into a normal React build easily.

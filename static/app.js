@@ -130,9 +130,10 @@ function HostPanel({ metrics }) {
   const rows = [
     ["Hostname", metrics?.host?.hostname],
     ["Platform", metrics?.host?.platform],
+    ["System", metrics?.host?.system],
     ["Machine", metrics?.host?.machine],
     ["CPU cores", metrics?.cpu?.cores],
-    ["Load avg", metrics?.cpu?.load ? `${metrics.cpu.load.one} / ${metrics.cpu.load.five} / ${metrics.cpu.load.fifteen}` : null],
+    ["Load avg", metrics?.cpu?.load?.one == null ? "Not available on this OS" : `${metrics.cpu.load.one} / ${metrics.cpu.load.five} / ${metrics.cpu.load.fifteen}`],
     ["Updated", metrics ? new Date(metrics.timestamp * 1000).toLocaleTimeString() : null],
   ];
   return h("section", { className: "host-panel" },
@@ -285,7 +286,7 @@ function App() {
       h("div", null,
         h("p", { className: "eyebrow" }, "React system dashboard"),
         h("h1", null, "System Health Monitor"),
-        h("p", { className: "subtitle" }, "Live CPU, memory, disk, network, uptime, temperature, and alert monitoring from a tiny Python backend.")
+        h("p", { className: "subtitle" }, "Live CPU, memory, disk, network, uptime, temperature, and alert monitoring from a tiny Python backend on Linux and Windows.")
       ),
       h("div", { className: "header-actions" },
         h("div", { className: "status-pill" }, h("span", { className: `dot ${overall}` }), `Overall: ${overall}`),
@@ -320,7 +321,7 @@ function App() {
         sub: `${metrics?.memory?.used_gb ?? "—"} GB used / ${metrics?.memory?.total_gb ?? "—"} GB`,
       }),
       h(MetricCard, {
-        title: "Disk /",
+        title: `Disk ${metrics?.disk?.path || ""}`,
         value: metrics?.disk?.used_percent,
         suffix: "%",
         percent: metrics?.disk?.used_percent,
@@ -328,7 +329,7 @@ function App() {
         sub: `${metrics?.disk?.free_gb ?? "—"} GB free / ${metrics?.disk?.total_gb ?? "—"} GB`,
       }),
       h(MetricCard, {
-        title: "Swap",
+        title: metrics?.host?.system === "Windows" ? "Page file" : "Swap",
         value: metrics?.memory?.swap_used_percent,
         suffix: "%",
         percent: metrics?.memory?.swap_used_percent,

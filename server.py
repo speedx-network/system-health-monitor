@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import mimetypes
 import os
@@ -45,7 +46,46 @@ def percent(used: int | float, total: int | float) -> float:
     return round((float(used) / float(total)) * 100, 1)
 
 
+def is_windows() -> bool:
+    return platform.system().lower() == "windows"
+
+
+class WindowsFileTime(ctypes.Structure):
+    _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+
+    def as_int(self) -> int:
+        return (int(self.dwHighDateTime) << 32) | int(self.dwLowDateTime)
+
+
+def _windows_kernel32():
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetSystemTimes.argtypes = [
+            ctypes.POINTER(WindowsFileTime),
+            ctypes.POINTER(WindowsFileTime),
+            ctypes.POINTER(WindowsFileTime),
+        ]
+        kernel32.GetSystemTimes.restype = ctypes.c_int
+        kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+        return kernel32
+    except (AttributeError, OSError):
+        return None
+
+
 def cpu_snapshot() -> tuple[int, int] | None:
+    if is_windows():
+        kernel32 = _windows_kernel32()
+        if kernel32 is None:
+            return None
+        idle = WindowsFileTime()
+        kernel = WindowsFileTime()
+        user = WindowsFileTime()
+        if not kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+        idle_value = idle.as_int()
+        total = kernel.as_int() + user.as_int()
+        return idle_value, total
+
     data = read_text(PROC_ROOT / "stat")
     if not data:
         return None
@@ -74,7 +114,57 @@ def cpu_percent() -> float | None:
     return round(100.0 * (1.0 - idle_delta / total_delta), 1)
 
 
+class WindowsMemoryStatus(ctypes.Structure):
+    _fields_ = [
+        ("dwLength", ctypes.c_ulong),
+        ("dwMemoryLoad", ctypes.c_ulong),
+        ("ullTotalPhys", ctypes.c_ulonglong),
+        ("ullAvailPhys", ctypes.c_ulonglong),
+        ("ullTotalPageFile", ctypes.c_ulonglong),
+        ("ullAvailPageFile", ctypes.c_ulonglong),
+        ("ullTotalVirtual", ctypes.c_ulonglong),
+        ("ullAvailVirtual", ctypes.c_ulonglong),
+        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+def windows_memory_metrics() -> dict:
+    kernel32 = _windows_kernel32()
+    if kernel32 is None:
+        return {"available": False, "used_percent": None}
+    status = WindowsMemoryStatus()
+    status.dwLength = ctypes.sizeof(WindowsMemoryStatus)
+    try:
+        kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(WindowsMemoryStatus)]
+        kernel32.GlobalMemoryStatusEx.restype = ctypes.c_int
+    except AttributeError:
+        return {"available": False, "used_percent": None}
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return {"available": False, "used_percent": None}
+
+    total = int(status.ullTotalPhys)
+    available = int(status.ullAvailPhys)
+    used = max(total - available, 0)
+    page_total = int(status.ullTotalPageFile)
+    page_available = int(status.ullAvailPageFile)
+    page_used = max(page_total - page_available, 0)
+
+    return {
+        "available": True,
+        "total_gb": bytes_to_gb(total),
+        "used_gb": bytes_to_gb(used),
+        "free_gb": bytes_to_gb(available),
+        "used_percent": percent(used, total),
+        "swap_total_gb": bytes_to_gb(page_total),
+        "swap_used_gb": bytes_to_gb(page_used),
+        "swap_used_percent": percent(page_used, page_total) if page_total else 0.0,
+    }
+
+
 def memory_metrics() -> dict:
+    if is_windows():
+        return windows_memory_metrics()
+
     data = read_text(PROC_ROOT / "meminfo")
     if not data:
         return {"available": False, "used_percent": None}
@@ -108,9 +198,10 @@ def memory_metrics() -> dict:
 
 
 def disk_metrics() -> dict:
-    usage = shutil.disk_usage("/")
+    path = os.environ.get("HEALTH_DISK_PATH") or (os.environ.get("SystemDrive", "C:") + "\\" if is_windows() else "/")
+    usage = shutil.disk_usage(path)
     return {
-        "path": "/",
+        "path": path,
         "total_gb": bytes_to_gb(usage.total),
         "used_gb": bytes_to_gb(usage.used),
         "free_gb": bytes_to_gb(usage.free),
@@ -118,7 +209,27 @@ def disk_metrics() -> dict:
     }
 
 
+def windows_network_totals() -> tuple[int, int] | None:
+    output = run_command(["netstat", "-e"], timeout=6)
+    if not output:
+        return None
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].lower().startswith("bytes"):
+            try:
+                return int(parts[1]), int(parts[2])
+            except ValueError:
+                return None
+    return None
+
+
 def network_snapshot() -> tuple[float, int, int] | None:
+    if is_windows():
+        totals = windows_network_totals()
+        if totals is None:
+            return None
+        return time.time(), totals[0], totals[1]
+
     data = read_text(PROC_ROOT / "net" / "dev")
     if not data:
         return None
@@ -162,6 +273,15 @@ def network_metrics() -> dict:
 
 
 def uptime_seconds() -> float | None:
+    if is_windows():
+        kernel32 = _windows_kernel32()
+        if kernel32 is None:
+            return None
+        try:
+            return round(kernel32.GetTickCount64() / 1000, 0)
+        except AttributeError:
+            return None
+
     data = read_text(PROC_ROOT / "uptime")
     if not data:
         return None
@@ -172,6 +292,11 @@ def uptime_seconds() -> float | None:
 
 
 def temperature_c() -> float | None:
+    if is_windows():
+        # Windows does not expose a stable built-in temperature API through the
+        # standard library. Keep the dashboard alive and report this as unknown.
+        return None
+
     thermal_root = SYS_ROOT / "class" / "thermal"
     try:
         zones = sorted(thermal_root.glob("thermal_zone*/temp"))
@@ -195,6 +320,12 @@ def temperature_c() -> float | None:
 
 
 def process_count() -> int | None:
+    if is_windows():
+        output = run_command(["tasklist", "/FO", "CSV", "/NH"], timeout=8)
+        if output is None:
+            return None
+        return sum(1 for line in output.splitlines() if line.strip())
+
     try:
         return sum(1 for child in PROC_ROOT.iterdir() if child.name.isdigit())
     except OSError:
@@ -202,6 +333,8 @@ def process_count() -> int | None:
 
 
 def load_average() -> dict:
+    if not hasattr(os, "getloadavg"):
+        return {"one": None, "five": None, "fifteen": None}
     try:
         one, five, fifteen = os.getloadavg()
         return {"one": round(one, 2), "five": round(five, 2), "fifteen": round(fifteen, 2)}
@@ -261,13 +394,13 @@ def detect_running_versions(limit: int = 24) -> list[dict]:
     dpkg_status = Path(os.environ.get("HEALTH_DPKG_STATUS", "/var/lib/dpkg/status"))
 
     commands = [
-        ("python", ["python3", "--version"]),
+        ("python", ["python", "--version"] if is_windows() else ["python3", "--version"]),
         ("openssl", ["openssl", "version"]),
         ("ssh", ["ssh", "-V"]),
         ("node", ["node", "--version"]),
         ("npm", ["npm", "--version"]),
         ("nginx", ["nginx", "-v"]),
-        ("apache", ["apache2", "-v"]),
+        ("apache", ["httpd", "-v"] if is_windows() else ["apache2", "-v"]),
         ("git", ["git", "--version"]),
         ("curl", ["curl", "--version"]),
     ]
@@ -283,6 +416,9 @@ def detect_running_versions(limit: int = 24) -> list[dict]:
             "source": "command",
             "raw": output.splitlines()[0][:160],
         }
+
+    if is_windows():
+        return sorted(candidates.values(), key=lambda item: item["name"])[:limit]
 
     dpkg_data = read_text(dpkg_status)
     interesting = {
